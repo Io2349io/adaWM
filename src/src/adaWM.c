@@ -1,6 +1,6 @@
 /* adaWM — minimal X11 window manager
- * Copyright 2026 io2349io
- * Licensed under the Apache License, Version 2.0. See LICENSE file in repository root.*/
+• Copyright 2026 io2349io
+• Licensed under the Apache License, Version 2.0. See LICENSE file in repository root.*/
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -49,6 +49,9 @@ static int     start_x, start_y, win_x, win_y;
 static Window  focused_win = None;
 static KeyCode key_f4, key_space, key_d, key_f11, key_tab;
 
+/* Forward declaration */
+void draw_decorations(Client *c);
+
 Client *get_client(Window w) {
     for (int i = 0; i < nclients; i++)
         if (clients[i] && (clients[i]->win == w || clients[i]->frame == w))
@@ -66,11 +69,16 @@ void set_focus(Window w) {
     Client *old_c = get_client(focused_win);
     focused_win = w;
     Client *new_c = get_client(focused_win);
-    if (old_c) { XClearWindow(dpy, old_c->frame); }
+
+    if (old_c) { 
+        XClearWindow(dpy, old_c->frame); 
+        draw_decorations(old_c); 
+    }
+    
     if (new_c) {
         XSetInputFocus(dpy, new_c->win, RevertToParent, CurrentTime);
         XRaiseWindow(dpy, new_c->frame);
-        XClearWindow(dpy, new_c->frame);
+        draw_decorations(new_c);
         XChangeProperty(dpy, root, net_active_win, XA_WINDOW, 32, PropModeReplace, (unsigned char *)&w, 1);
     } else {
         XSetInputFocus(dpy, root, RevertToParent, CurrentTime);
@@ -122,10 +130,10 @@ void set_shape(Client *c, int rad) {
     XSetForeground(dpy, gc, 1);
     XFillRectangle(dpy, mask, gc, rad, 0, win_w - dia, win_h);
     XFillRectangle(dpy, mask, gc, 0, rad, win_w, win_h - dia);
-    XFillArc(dpy, mask, gc, 0, 0, dia, dia, 90*64, 90*64);
-    XFillArc(dpy, mask, gc, win_w - dia, 0, dia, dia, 0*64, 90*64);
-    XFillArc(dpy, mask, gc, 0, win_h - dia, dia, dia, 180*64, 90*64);
-    XFillArc(dpy, mask, gc, win_w - dia, win_h - dia, dia, dia, 270*64, 90*64);
+    XFillArc(dpy, mask, gc, 0, 0, dia, dia, 90 * 64, 90 * 64);
+    XFillArc(dpy, mask, gc, win_w - dia, 0, dia, dia, 0 * 64, 90 * 64);
+    XFillArc(dpy, mask, gc, 0, win_h - dia, dia, dia, 180 * 64, 90 * 64);
+    XFillArc(dpy, mask, gc, win_w - dia, win_h - dia, dia, dia, 270 * 64, 90 * 64);
     XShapeCombineMask(dpy, c->frame, ShapeBounding, 0, 0, mask, ShapeSet);
     XFreePixmap(dpy, mask); XFreeGC(dpy, gc);
 }
@@ -136,20 +144,24 @@ void draw_decorations(Client *c) {
     GC gc = DefaultGC(dpy, c->screen);
     XSetForeground(dpy, gc, frame_bg_pixel);
     XFillRectangle(dpy, c->frame, gc, 0, 0, c->w, TITLE);
+    
+    /* macOS style buttons */
     XSetForeground(dpy, gc, btn_red_pixel); XFillArc(dpy, c->frame, gc, 12, (TITLE-BTN)/2, BTN, BTN, 0, 360*64);
     XSetForeground(dpy, gc, btn_yellow_pixel); XFillArc(dpy, c->frame, gc, 34, (TITLE-BTN)/2, BTN, BTN, 0, 360*64);
     XSetForeground(dpy, gc, btn_green_pixel); XFillArc(dpy, c->frame, gc, 56, (TITLE-BTN)/2, BTN, BTN, 0, 360*64);
+    
+    /* Font rendering */
     XftDraw *draw = XftDrawCreate(dpy, c->frame, visual, colormap);
-    if (draw) {
-        if (xfont) {
-            XGlyphInfo ext;
-            XftTextExtentsUtf8(dpy, xfont, (FcChar8 *)c->title, strlen(c->title), &ext);
-            int tx = (c->w - ext.xOff) / 2; if (tx < 80) tx = 80;
-            int ty = (TITLE - (xfont->ascent + xfont->descent)) / 2 + xfont->ascent;
-            XftDrawStringUtf8(draw, &xft_fg, xfont, tx, ty, (FcChar8 *)c->title, strlen(c->title));
-        }
+    if (draw && xfont) {
+        XGlyphInfo ext;
+        XftTextExtentsUtf8(dpy, xfont, (FcChar8 *)c->title, strlen(c->title), &ext);
+        int tx = (c->w - ext.xOff) / 2; if (tx < 80) tx = 80;
+        int ty = (TITLE - (xfont->ascent + xfont->descent)) / 2 + xfont->ascent;
+        XftDrawStringUtf8(draw, &xft_fg, xfont, tx, ty, (FcChar8 *)c->title, strlen(c->title));
         XftDrawDestroy(draw);
     }
+    
+    /* Frame border */
     XSetForeground(dpy, gc, is_focused ? COLOR_BLUE : COLOR_INACTIVE);
     XSetLineAttributes(dpy, gc, is_focused ? 2 : 1, LineSolid, CapButt, JoinRound);
     XDrawRectangle(dpy, c->frame, gc, 0, 0, c->w-1, c->h+TITLE-1);
@@ -186,47 +198,71 @@ int main(void) {
     root = DefaultRootWindow(dpy);
     int scr = DefaultScreen(dpy);
     visual = DefaultVisual(dpy, scr); colormap = DefaultColormap(dpy, scr);
+    
     wm_proto = XInternAtom(dpy, "WM_PROTOCOLS", False);
     wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
     utf8_string = XInternAtom(dpy, "UTF8_STRING", False);
     setup_ewmh();
+    
     XColor xc;
-    if (XParseColor(dpy, colormap, COLOR_FRAME_BG, &xc) && XAllocColor(dpy, colormap, &xc)) frame_bg_pixel = xc.pixel;
-    if (XParseColor(dpy, colormap, "#ff5f56", &xc) && XAllocColor(dpy, colormap, &xc)) btn_red_pixel = xc.pixel;
-    if (XParseColor(dpy, colormap, "#ffbd2e", &xc) && XAllocColor(dpy, colormap, &xc)) btn_yellow_pixel = xc.pixel;
-    if (XParseColor(dpy, colormap, "#27c93f", &xc) && XAllocColor(dpy, colormap, &xc)) btn_green_pixel = xc.pixel;
+    XParseColor(dpy, colormap, COLOR_FRAME_BG, &xc); XAllocColor(dpy, colormap, &xc); frame_bg_pixel = xc.pixel;
+    XParseColor(dpy, colormap, "#ff5f56", &xc); XAllocColor(dpy, colormap, &xc); btn_red_pixel = xc.pixel;
+    XParseColor(dpy, colormap, "#ffbd2e", &xc); XAllocColor(dpy, colormap, &xc); btn_yellow_pixel = xc.pixel;
+    XParseColor(dpy, colormap, "#27c93f", &xc); XAllocColor(dpy, colormap, &xc); btn_green_pixel = xc.pixel;
+    
     xfont = XftFontOpenName(dpy, scr, FONT);
     XftColorAllocName(dpy, visual, colormap, COLOR_TEXT, &xft_fg);
+    
     key_f4 = XKeysymToKeycode(dpy, XK_F4); key_space = XKeysymToKeycode(dpy, XK_space);
     key_d = XKeysymToKeycode(dpy, XK_d); key_f11 = XKeysymToKeycode(dpy, XK_F11);
     key_tab = XKeysymToKeycode(dpy, XK_Tab);
+    
     XGrabKey(dpy, key_f4, Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, key_space, Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, key_d, Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, key_f11, Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, key_tab, Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
+    
     XSelectInput(dpy, root, SubstructureRedirectMask|SubstructureNotifyMask|KeyPressMask);
     signal(SIGCHLD, SIG_IGN);
     XEvent ev;
+    
     while (1) {
         XNextEvent(dpy, &ev);
+        
         if (ev.type == MapRequest) {
             Window w = ev.xmaprequest.window;
             XWindowAttributes a; if (!XGetWindowAttributes(dpy, w, &a)) continue;
             Client *c = calloc(1, sizeof(Client));
             c->win = w; c->x = a.x; c->y = a.y; c->w = a.width; c->h = a.height; c->screen = scr;
+            
+            /* Enforce minimum width to prevent buttons rendering off-frame */
+            if (c->w < 120) c->w = 120; 
+            
             fetch_title(c);
             c->frame = XCreateSimpleWindow(dpy, root, c->x, c->y, c->w, c->h+TITLE, 0, 0, frame_bg_pixel);
             XSelectInput(dpy, c->frame, ExposureMask|ButtonPressMask|Button1MotionMask|ButtonReleaseMask);
             XSelectInput(dpy, w, PropertyChangeMask);
             XReparentWindow(dpy, w, c->frame, 0, TITLE);
-            XMapWindow(dpy, w); XMapWindow(dpy, c->frame);
-            if (nclients < MAX_CLIENTS) { clients[nclients++] = c; update_client_list(); set_focus(w); }
+            
+            XMapWindow(dpy, w); 
+            XMapWindow(dpy, c->frame);
+            XRaiseWindow(dpy, c->frame); /* Ensure frame is on top */
+            
+            if (nclients < MAX_CLIENTS) { 
+                clients[nclients++] = c; 
+                update_client_list(); 
+                set_focus(w); 
+            }
+            draw_decorations(c); /* Force immediate draw */
         }
-        else if (ev.type == Expose && ev.xexpose.count == 0) draw_decorations(get_client(ev.xexpose.window));
+        else if (ev.type == Expose && ev.xexpose.count == 0) {
+            draw_decorations(get_client(ev.xexpose.window));
+        }
         else if (ev.type == PropertyNotify && (ev.xproperty.atom == net_wm_name || ev.xproperty.atom == XA_WM_NAME)) {
-            Client *c = get_client(ev.xproperty.window); if (c) { fetch_title(c); draw_decorations(c); }
+            Client *c = get_client(ev.xproperty.window); 
+            if (c) { fetch_title(c); draw_decorations(c); }
         }
         else if (ev.type == ButtonPress) {
             Client *c = get_client(ev.xbutton.window);
@@ -241,7 +277,13 @@ int main(void) {
                         XMoveResizeWindow(dpy, c->win, 0, TITLE, sw, sh - TITLE);
                         c->x = 0; c->y = 0; c->w = sw; c->h = sh - TITLE;
                         draw_decorations(c);
-                    } else { dragging = 1; start_x = ev.xbutton.x_root; start_y = ev.xbutton.y_root; win_x = c->x; win_y = c->y; }
+                    } else { 
+                        dragging = 1; 
+                        start_x = ev.xbutton.x_root; 
+                        start_y = ev.xbutton.y_root; 
+                        win_x = c->x; 
+                        win_y = c->y; 
+                    }
                 }
             }
         }
@@ -271,18 +313,29 @@ int main(void) {
                     set_focus(clients[next]->win);
                 }
             }
-            else if ((ev.xkey.keycode == key_f4 && (ev.xkey.state & Mod1Mask)) || (ev.xkey.keycode == key_d && (ev.xkey.state & Mod4Mask))) {
+            else if ((ev.xkey.keycode == key_f4 && (ev.xkey.state & Mod1Mask)) || 
+                     (ev.xkey.keycode == key_d && (ev.xkey.state & Mod4Mask))) {
                 if (focused_win != None) send_close(focused_win);
             } 
             else if (ev.xkey.keycode == key_f11 && (ev.xkey.state & Mod4Mask)) {
-                if (fork() == 0) { if (dpy) close(ConnectionNumber(dpy)); setsid(); execlp("xfce4-terminal", "xfce4-terminal", NULL); _exit(1); }
+                if (fork() == 0) { 
+                    if (dpy) close(ConnectionNumber(dpy)); 
+                    setsid(); 
+                    execlp("xfce4-terminal", "xfce4-terminal", NULL); 
+                    _exit(1); 
+                }
             }
             else if (ev.xkey.keycode == key_space && (ev.xkey.state & Mod4Mask)) {
-                if (fork() == 0) { if (dpy) close(ConnectionNumber(dpy)); setsid(); execlp("rofi", "rofi", "-show", "drun", NULL); _exit(1); }
+                if (fork() == 0) { 
+                    if (dpy) close(ConnectionNumber(dpy)); 
+                    setsid(); 
+                    execlp("rofi", "rofi", "-show", "drun", NULL); 
+                    _exit(1); 
+                }
             }
         }
-        else if (ev.type == DestroyNotify) {
-            Window w = ev.xdestroywindow.window;
+        else if (ev.type == DestroyNotify || ev.type == UnmapNotify) {
+            Window w = ev.xany.window;
             if (get_client(w)) remove_client(w);
         }
     }
