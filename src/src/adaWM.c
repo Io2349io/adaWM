@@ -7,12 +7,14 @@
 #include <X11/Xutil.h>
 #include <X11/Xft/Xft.h>
 #include <X11/keysym.h>
+#include <X11/cursorfont.h>
 #include <X11/extensions/shape.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 #define TITLE           30 
 #define BTN             14
@@ -26,9 +28,16 @@
 #define COLOR_TEXT       "#e0e0e0"
 #define COLOR_INACTIVE   0x444444
 
+#define WORKSPACES 9
+
 typedef struct {
     Window win, frame;
     int x, y, w, h, screen;
+    
+    int workspace;
+    int floating;
+    int ontop;
+    
     char title[256];
 } Client;
 
@@ -43,20 +52,111 @@ Colormap  colormap;
 XftFont  *xfont = NULL;
 XftColor  xft_fg;
 
+int current_workspace = 0;
+KeyCode ws_keys[WORKSPACES];
+KeyCode key_tile;
+KeyCode key_ontop;
+KeyCode key_restart;
+
 static unsigned long frame_bg_pixel, btn_red_pixel, btn_yellow_pixel, btn_green_pixel;
-static int     dragging = 0;
-static int     start_x, start_y, win_x, win_y;
+static int     dragging = 0, resizing = 0;
+static int     start_x, start_y, win_x, win_y, start_w, start_h;
 static Window  focused_win = None;
 static KeyCode key_f4, key_space, key_d, key_f11, key_tab;
+static Cursor  cursor_normal;
 
 /* Forward declaration */
 void draw_decorations(Client *c);
+
+void sigchld_handler(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+}
+
+void run_autostart() {
+    char *home = getenv("HOME");
+    if (!home) return;
+
+    if (fork() == 0) {
+        if (dpy) close(ConnectionNumber(dpy));
+        setsid();
+        
+        char path[512];
+        snprintf(path, sizeof(path), "%s/.config/adawm/autostart.sh", home);
+        
+        execl(path, path, NULL);
+        _exit(1);
+    }
+}
 
 Client *get_client(Window w) {
     for (int i = 0; i < nclients; i++)
         if (clients[i] && (clients[i]->win == w || clients[i]->frame == w))
             return clients[i];
     return NULL;
+}
+
+void switch_workspace(int ws) {
+    if(ws < 0 || ws >= WORKSPACES)
+        return;
+
+    for(int i=0; i<nclients; i++) {
+        if(clients[i]->workspace == current_workspace)
+            XUnmapWindow(dpy, clients[i]->frame);
+    }
+
+    current_workspace = ws;
+
+    for(int i=0; i<nclients; i++) {
+        if(clients[i]->workspace == current_workspace)
+            XMapWindow(dpy, clients[i]->frame);
+    }
+
+    focused_win = None;
+}
+
+void toggle_ontop(Client *c) {
+    if(!c)
+        return;
+
+    c->ontop = !c->ontop;
+
+    if(c->ontop)
+        XRaiseWindow(dpy, c->frame);
+}
+
+void tile_windows() {
+    int count = 0;
+
+    for(int i=0; i<nclients; i++)
+        if(clients[i]->workspace == current_workspace)
+            count++;
+
+    if(count == 0)
+        return;
+
+    int sw = DisplayWidth(dpy, 0);
+    int sh = DisplayHeight(dpy, 0);
+
+    int width = sw / count;
+    int x = 0;
+
+    for(int i=0; i<nclients; i++) {
+        Client *c = clients[i];
+
+        if(c->workspace != current_workspace)
+            continue;
+
+        XMoveResizeWindow(dpy, c->frame, x, 0, width, sh);
+        XMoveResizeWindow(dpy, c->win, 0, TITLE, width, sh - TITLE);
+
+        c->x = x;
+        c->y = 0;
+        c->w = width;
+        c->h = sh - TITLE;
+
+        x += width;
+        draw_decorations(c);
+    }
 }
 
 void update_client_list() {
@@ -199,6 +299,9 @@ int main(void) {
     int scr = DefaultScreen(dpy);
     visual = DefaultVisual(dpy, scr); colormap = DefaultColormap(dpy, scr);
     
+    cursor_normal = XCreateFontCursor(dpy, XC_left_ptr);
+    XDefineCursor(dpy, root, cursor_normal);
+    
     wm_proto = XInternAtom(dpy, "WM_PROTOCOLS", False);
     wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
@@ -224,8 +327,22 @@ int main(void) {
     XGrabKey(dpy, key_f11, Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, key_tab, Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
     
+    for(int i=0; i<9; i++) {
+        ws_keys[i] = XKeysymToKeycode(dpy, XK_1+i);
+        XGrabKey(dpy, ws_keys[i], Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
+    }
+
+    key_tile = XKeysymToKeycode(dpy, XK_t);
+    XGrabKey(dpy, key_tile, Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
+
+    key_ontop = XKeysymToKeycode(dpy, XK_a);
+    XGrabKey(dpy, key_ontop, Mod4Mask, root, True, GrabModeAsync, GrabModeAsync);
+    
     XSelectInput(dpy, root, SubstructureRedirectMask|SubstructureNotifyMask|KeyPressMask);
-    signal(SIGCHLD, SIG_IGN);
+    signal(SIGCHLD, sigchld_handler);
+    
+    run_autostart();
+    
     XEvent ev;
     
     while (1) {
@@ -237,25 +354,29 @@ int main(void) {
             Client *c = calloc(1, sizeof(Client));
             c->win = w; c->x = a.x; c->y = a.y; c->w = a.width; c->h = a.height; c->screen = scr;
             
-            /* Enforce minimum width to prevent buttons rendering off-frame */
+            c->workspace = current_workspace;
+            c->floating = 1;
+            c->ontop = 0;
+            
             if (c->w < 120) c->w = 120; 
+            if (c->h < 50) c->h = 50;
             
             fetch_title(c);
             c->frame = XCreateSimpleWindow(dpy, root, c->x, c->y, c->w, c->h+TITLE, 0, 0, frame_bg_pixel);
-            XSelectInput(dpy, c->frame, ExposureMask|ButtonPressMask|Button1MotionMask|ButtonReleaseMask);
+            XSelectInput(dpy, c->frame, ExposureMask|ButtonPressMask|Button1MotionMask|Button3MotionMask|ButtonReleaseMask);
             XSelectInput(dpy, w, PropertyChangeMask);
             XReparentWindow(dpy, w, c->frame, 0, TITLE);
             
             XMapWindow(dpy, w); 
             XMapWindow(dpy, c->frame);
-            XRaiseWindow(dpy, c->frame); /* Ensure frame is on top */
+            XRaiseWindow(dpy, c->frame);
             
             if (nclients < MAX_CLIENTS) { 
                 clients[nclients++] = c; 
                 update_client_list(); 
                 set_focus(w); 
             }
-            draw_decorations(c); /* Force immediate draw */
+            draw_decorations(c);
         }
         else if (ev.type == Expose && ev.xexpose.count == 0) {
             draw_decorations(get_client(ev.xexpose.window));
@@ -268,7 +389,7 @@ int main(void) {
             Client *c = get_client(ev.xbutton.window);
             if (c) {
                 set_focus(c->win);
-                if (ev.xbutton.y < TITLE) {
+                if (ev.xbutton.button == Button1 && ev.xbutton.y < TITLE) {
                     if (ev.xbutton.x >= 12 && ev.xbutton.x <= 12+BTN) send_close(c->win);
                     else if (ev.xbutton.x >= 34 && ev.xbutton.x <= 34+BTN) XUnmapWindow(dpy, c->frame);
                     else if (ev.xbutton.x >= 56 && ev.xbutton.x <= 56+BTN) {
@@ -279,28 +400,60 @@ int main(void) {
                         draw_decorations(c);
                     } else { 
                         dragging = 1; 
-                        start_x = ev.xbutton.x_root; 
-                        start_y = ev.xbutton.y_root; 
-                        win_x = c->x; 
-                        win_y = c->y; 
+                        start_x = ev.xbutton.x_root; start_y = ev.xbutton.y_root; 
+                        win_x = c->x; win_y = c->y; 
+                    }
+                } 
+                else if (ev.xbutton.button == Button3) {
+                    resizing = 1;
+                    start_x = ev.xbutton.x_root; start_y = ev.xbutton.y_root;
+                    start_w = c->w; start_h = c->h;
+                }
+            }
+        }
+        else if (ev.type == MotionNotify) {
+            Client *c = get_client(ev.xmotion.window);
+            if (c) {
+                if (dragging) {
+                    int nx = win_x + (ev.xmotion.x_root - start_x), ny = win_y + (ev.xmotion.y_root - start_y);
+                    int sw = DisplayWidth(dpy, scr), sh = DisplayHeight(dpy, scr);
+                    if (nx < SNAP_THRESHOLD && nx > -SNAP_THRESHOLD) nx = 0;
+                    if (nx + c->w > sw - SNAP_THRESHOLD && nx + c->w < sw + SNAP_THRESHOLD) nx = sw - c->w;
+                    if (ny < SNAP_THRESHOLD && ny > -SNAP_THRESHOLD) ny = 0;
+                    if (ny + c->h + TITLE > sh - SNAP_THRESHOLD && ny + c->h + TITLE < sh + SNAP_THRESHOLD) ny = sh - (c->h + TITLE);
+                    XMoveWindow(dpy, c->frame, nx, ny); c->x = nx; c->y = ny;
+                } 
+                else if (resizing) {
+                    int nw = start_w + (ev.xmotion.x_root - start_x);
+                    int nh = start_h + (ev.xmotion.y_root - start_y);
+                    if (nw > 120 && nh > 50) {
+                        XResizeWindow(dpy, c->frame, nw, nh + TITLE);
+                        XResizeWindow(dpy, c->win, nw, nh);
+                        c->w = nw; c->h = nh;
+                        draw_decorations(c);
                     }
                 }
             }
         }
-        else if (ev.type == MotionNotify && dragging) {
-            Client *c = get_client(ev.xmotion.window);
-            if (c) {
-                int nx = win_x + (ev.xmotion.x_root - start_x), ny = win_y + (ev.xmotion.y_root - start_y);
-                int sw = DisplayWidth(dpy, scr), sh = DisplayHeight(dpy, scr);
-                if (nx < SNAP_THRESHOLD && nx > -SNAP_THRESHOLD) nx = 0;
-                if (nx + c->w > sw - SNAP_THRESHOLD && nx + c->w < sw + SNAP_THRESHOLD) nx = sw - c->w;
-                if (ny < SNAP_THRESHOLD && ny > -SNAP_THRESHOLD) ny = 0;
-                if (ny + c->h + TITLE > sh - SNAP_THRESHOLD && ny + c->h + TITLE < sh + SNAP_THRESHOLD) ny = sh - (c->h + TITLE);
-                XMoveWindow(dpy, c->frame, nx, ny); c->x = nx; c->y = ny;
-            }
+        else if (ev.type == ButtonRelease) {
+            dragging = 0;
+            resizing = 0;
         }
-        else if (ev.type == ButtonRelease) dragging = 0;
         else if (ev.type == KeyPress) {
+            for(int i=0; i<9; i++) {
+                if(ev.xkey.keycode == ws_keys[i] && (ev.xkey.state & Mod4Mask)) {
+                    switch_workspace(i);
+                }
+            }
+
+            if(ev.xkey.keycode == key_tile && (ev.xkey.state & Mod4Mask)) {
+                tile_windows();
+            }
+
+            if(ev.xkey.keycode == key_ontop && (ev.xkey.state & Mod4Mask)) {
+                toggle_ontop(get_client(focused_win));
+            }
+
             if (ev.xkey.keycode == key_tab && (ev.xkey.state & Mod1Mask)) {
                 if (nclients > 1) {
                     int next = 0;
